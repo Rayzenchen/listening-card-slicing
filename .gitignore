@@ -1,0 +1,18 @@
+.DS_Store
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+*.log
+*.zip
+
+# Large / user-specific runtime data (setup recreates these)
+workspace/系统/.venv/
+workspace/系统/models/*
+!workspace/系统/models/.gitkeep
+workspace/系统/bin/ffmpeg
+workspace/材料区/*
+!workspace/材料区/.gitkeep
+!workspace/材料区/README.md
+workspace/产出区/*
+!workspace/产出区/.gitkeep

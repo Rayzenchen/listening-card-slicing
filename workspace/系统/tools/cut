@@ -1,0 +1,17 @@
+#!/bin/bash
+# Entry point: cut one audio file into the user's exact text segments.
+#
+#   ./tools/cut --audio "path/to/audio.mp3" --text "path/to/text.txt" [--out DIR] [--lang auto|en|zh]
+#
+# Exit codes: 0 ok | 3 needs_review | 1 error | 2 usage error
+set -uo pipefail
+WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PY="$WS/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  echo "ERROR: workspace venv missing. Run tools/setup.sh first." >&2
+  exit 1
+fi
+export KMP_DUPLICATE_LIB_OK="${KMP_DUPLICATE_LIB_OK:-TRUE}"
+export PATH="$WS/bin:$PATH"
+export PYTHONPATH="$WS/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m cutaudio "$@"
