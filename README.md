@@ -9,13 +9,12 @@
 
 > 目标平台：**macOS 14+ / Apple Silicon**。切分使用 MLX Whisper，Intel Mac / Windows 不能直接跑。
 > 首次安装需要 Python 3.12、Homebrew（用于 libomp）、约 4 GB 磁盘、能访问 PyPI 与 Hugging Face。
-> 仓库默认 **private**；另一台电脑先 `gh auth login`，或用有权限的 HTTPS/SSH 凭据 clone。
+> 仓库为 **public**；直接 `git clone` 即可，无需登录。
 
 ## 一键安装
 
 ```bash
-gh auth login          # 一次；私有仓库需要登录
-gh repo clone Rayzenchen/listening-card-slicing
+git clone https://github.com/Rayzenchen/listening-card-slicing.git
 cd listening-card-slicing
 ./setup.sh
 ```
@@ -150,4 +149,4 @@ workspace/系统/.venv/bin/python workspace/系统/tools/doctor.py --deep
 
 ## 说明
 
-本仓库为个人工作流打包，未附开源许可证；仓库默认私有。skill/工作区文档中的少量英文/中文例句只用于说明格式与规则，不是完整听力原文。
+本仓库为个人工作流打包，未附开源许可证；仓库为公开仓库。skill/工作区文档中的少量英文/中文例句只用于说明格式与规则，不是完整听力原文。
