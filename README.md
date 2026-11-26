@@ -8,12 +8,14 @@
 - `workspace/材料区` / `workspace/产出区`：输入与交付（默认空）
 
 > 目标平台：**macOS 14+ / Apple Silicon**。切分使用 MLX Whisper，Intel Mac / Windows 不能直接跑。
-> 首次安装需要 Python 3.12、约 4 GB 磁盘、能访问 PyPI 与 Hugging Face。
+> 首次安装需要 Python 3.12、Homebrew（用于 libomp）、约 4 GB 磁盘、能访问 PyPI 与 Hugging Face。
+> 仓库默认 **private**；另一台电脑先 `gh auth login`，或用有权限的 HTTPS/SSH 凭据 clone。
 
 ## 一键安装
 
 ```bash
-git clone https://github.com/Rayzenchen/listening-card-slicing.git
+gh auth login          # 一次；私有仓库需要登录
+gh repo clone Rayzenchen/listening-card-slicing
 cd listening-card-slicing
 ./setup.sh
 ```
@@ -139,8 +141,8 @@ workspace/系统/.venv/bin/python workspace/系统/tools/doctor.py --deep
 
 ## 故障排查
 
-- **`OMP: Error #15`**：重跑 `./setup.sh`（会安装/复用一份共享 libomp 并补进 torch）；或 `brew install libomp` 后重跑。
 - **Python 3.12 缺失**：`brew install python@3.12`；或用 `PY_BASE=/path/to/python3.12 ./setup.sh`。
+- **libomp 缺失 / `OMP: Error #15`**：`brew install libomp` 后重跑 `./setup.sh`；setup 会把同一份 libomp 补进 torch。
 - **模型下载慢/中断**：重跑 `./setup.sh`，`snapshot_download` 会续传；或手动按上面的 `snapshot_download` 命令。
 - **`doctor` 报 ffmpeg 缺失**：重跑 setup；仍失败则
   `workspace/系统/.venv/bin/python -m pip install --force-reinstall --no-deps imageio-ffmpeg==0.6.0` 后重跑。

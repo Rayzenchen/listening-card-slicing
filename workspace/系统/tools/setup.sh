@@ -79,6 +79,10 @@ for c in candidates:
         print(f"PATCHED replaced torch/lib/libomp.dylib with {c}")
         break
 else:
+    found = [c for c in candidates if os.path.exists(c)]
+    if not found:
+        print("ERROR: no shared libomp found. Install Homebrew, then: brew install libomp")
+        raise SystemExit(1)
     print("OK already a single shared libomp")
 PYEOF
 )"
