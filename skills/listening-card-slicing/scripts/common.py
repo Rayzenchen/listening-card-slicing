@@ -58,6 +58,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -82,6 +83,11 @@ SKILL_ROOT = os.path.dirname(HERE)
 
 AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".flac")
 TEXT_EXTS = (".md", ".txt")
+
+#: E7 delivered segment container (mp3 / 44.1 kHz / mono / 64 kbps CBR).
+SEGMENT_EXT = ".mp3"
+SEGMENT_FORMAT = {"container": "mp3", "sample_rate": 44100, "channels": 1,
+                  "bitrate_kbps": 64}
 
 #: U+2013 EN DASH, used by the frozen manifest range format (``005–011``).
 EN_DASH = "\u2013"
@@ -1648,3 +1654,203 @@ def format_size(num_bytes: int) -> str:
             return ("%.0f %s" if unit == "B" else "%.1f %s") % (value, unit)
         value /= 1024
     return "%.1f GB" % value  # pragma: no cover - unreachable
+
+
+# --- delivered segment audio (mp3 / 44.1k / mono / 64k) ---------------------
+#
+# E7 is the only stage that changes the delivered container: the E6 ZIP stays
+# wav (an intermediate), ``split_cards.py`` writes wav, and the pack stage
+# transcodes every ``<NNN>.wav`` to ``<NNN>.mp3`` before writing ``pack.json``.
+# The workspace ships ffmpeg but **no ffprobe**, so probing parses ffmpeg's own
+# stderr (``Audio: mp3, 44100 Hz, mono, ... 64 kb/s`` + the last ``time=``).
+#
+# A delivered pack keeps a single extension for every segment; old packs are
+# wav and new packs are mp3 (``pack.json.format`` records which one).  Every
+# consumer asks :func:`pack_audio_ext` instead of hard-coding ``.wav``.
+
+_AUDIO_STREAM_RE = re.compile(
+    r"Stream #\d+:\d+[^:]*: Audio: ([^,\r\n]+),\s*(\d+) Hz,\s*([^,\r\n]+)")
+_KBPS_RE = re.compile(r"(\d+)\s*kb/s")
+_TIME_TOKEN_RE = re.compile(r"time=(\S+)")
+
+
+def segment_name(n: int) -> str:
+    """File name of one delivered segment: ``001.mp3``."""
+    return "%03d%s" % (int(n), SEGMENT_EXT)
+
+
+def find_ffmpeg(work: str) -> str:
+    """Locate ffmpeg: ``$FFMPEG`` → ``<work>/系统/bin/ffmpeg`` → ``PATH``.
+
+    Raises :class:`Failure` (exit 2) with a readable message when none of the
+    candidates is an executable file.  An explicitly set ``$FFMPEG`` that does
+    not resolve is a usage error rather than a silent fallback.
+    """
+    explicit = os.environ.get("FFMPEG")
+    if explicit:
+        if os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+            return os.path.abspath(explicit)
+        found = shutil.which(explicit)
+        if found:
+            return found
+        raise Failure(EXIT_USAGE,
+                      "环境变量 FFMPEG=%r 不是可执行的 ffmpeg；"
+                      "请改成分片转码用的 ffmpeg 路径，或取消该变量" % explicit)
+    workspace_ffmpeg = os.path.join(work or "", "系统", "bin", "ffmpeg")
+    if os.path.isfile(workspace_ffmpeg) and os.access(workspace_ffmpeg, os.X_OK):
+        return os.path.abspath(workspace_ffmpeg)
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    raise Failure(EXIT_USAGE,
+                  "找不到 ffmpeg：查过环境变量 FFMPEG、%s、PATH。"
+                  "片段转成 mp3 需要 ffmpeg（本机不需要 ffprobe）。"
+                  % workspace_ffmpeg)
+
+
+def _channel_count(layout: str) -> int:
+    """``mono``/``stereo``/``2 channels`` → an int; unknown layouts → 0."""
+    token = layout.strip().lower()
+    if token == "mono":
+        return 1
+    if token == "stereo":
+        return 2
+    match = re.search(r"(\d+)\s*channels?", token)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"(\d+)", token)
+    return int(match.group(1)) if match else 0
+
+
+def probe_audio(path: str, ffmpeg: str) -> dict:
+    """Read duration + stream facts of an mp3 through ``ffmpeg`` stderr.
+
+    Command: ``ffmpeg -nostdin -hide_banner -i <path> -vn -f null -``.  Only the
+    **input** stream line counts (the null output line is pcm, not mp3), and the
+    duration is the last ``time=HH:MM:SS.xx`` progress token.
+
+    Returns ``{"duration_sec", "sample_rate", "channels", "codec", "kbps"}``.
+    Raises ``ValueError`` when ffmpeg fails, prints no time, or the input is not
+    an mp3 audio stream.
+    """
+    command = [ffmpeg, "-nostdin", "-hide_banner", "-i", path,
+               "-vn", "-f", "null", "-"]
+    proc = subprocess.run(command, capture_output=True, text=True)
+    stderr = proc.stderr or ""
+    if proc.returncode != 0:
+        detail = [line.strip() for line in stderr.splitlines() if line.strip()]
+        raise ValueError("ffmpeg 读不了 %s（exit=%d）：%s"
+                         % (os.path.basename(path), proc.returncode,
+                            (detail[-1] if detail else "无错误输出")[:240]))
+    input_part = stderr.split("Output #0", 1)[0]
+    audio_line = next((line for line in input_part.splitlines()
+                       if "Audio:" in line), "")
+    match = _AUDIO_STREAM_RE.search(audio_line)
+    if not match:
+        raise ValueError("%s 里没有音频流" % os.path.basename(path))
+    codec = match.group(1).strip()
+    if "mp3" not in codec.lower():
+        raise ValueError("%s 不是 mp3 音频流（codec=%s）"
+                         % (os.path.basename(path), codec))
+    tokens = _TIME_TOKEN_RE.findall(stderr)
+    if not tokens:
+        raise ValueError("%s 的 ffmpeg 输出里没有 time=，读不到时长"
+                         % os.path.basename(path))
+    time_match = re.match(r"^(\d+):(\d+):(\d+(?:\.\d+)?)$", tokens[-1])
+    if not time_match:
+        raise ValueError("%s 的时长不是数字：%r"
+                         % (os.path.basename(path), tokens[-1][:40]))
+    seconds = (int(time_match.group(1)) * 3600 + int(time_match.group(2)) * 60
+               + float(time_match.group(3)))
+    kbps_match = _KBPS_RE.search(audio_line)
+    return {
+        "duration_sec": round(seconds, 6),
+        "sample_rate": int(match.group(2)),
+        "channels": _channel_count(match.group(3)),
+        "codec": "mp3",
+        "kbps": int(kbps_match.group(1)) if kbps_match else None,
+    }
+
+
+def transcode_segment(src: str, dst: str, ffmpeg: str) -> dict:
+    """Transcode one wav segment to mp3 CBR 64k (44.1 kHz / mono), then verify.
+
+    ffmpeg writes ``<dst>.part`` first; only a successful, probe-verified file is
+    moved to ``dst`` with ``os.replace``.  The returned dict is the probe result
+    plus ``bytes``.
+    """
+    if not os.path.isfile(src):
+        raise ValueError("源片段不存在：%s" % src)
+    parent = os.path.dirname(os.path.abspath(dst))
+    ensure_dir(parent)
+    part = dst + ".part"
+    command = [ffmpeg, "-nostdin", "-hide_banner", "-y", "-i", src,
+               "-map_metadata", "-1", "-ac", "1", "-ar", "44100",
+               "-c:a", "libmp3lame", "-b:a", "64k", "-f", "mp3", part]
+    proc = subprocess.run(command, capture_output=True, text=True)
+    if proc.returncode != 0 or not os.path.isfile(part):
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        detail = [line.strip() for line in (proc.stderr or "").splitlines()
+                  if line.strip()]
+        raise ValueError("ffmpeg 转 mp3 失败（exit=%d）：%s"
+                         % (proc.returncode,
+                            (detail[-1] if detail else "没有生成输出文件")[:240]))
+    os.replace(part, dst)
+    try:
+        info = probe_audio(dst, ffmpeg)
+        if info["sample_rate"] != SEGMENT_FORMAT["sample_rate"] \
+                or info["channels"] != SEGMENT_FORMAT["channels"]:
+            raise ValueError("转码结果规格不符：%d Hz / %s 声道（要 44100 Hz / 单声道）"
+                             % (info["sample_rate"], info["channels"]))
+        kbps = info.get("kbps")
+        if kbps is not None and kbps != SEGMENT_FORMAT["bitrate_kbps"]:
+            raise ValueError("转码结果码率 %d kbps（要 64 kbps）" % kbps)
+    except ValueError:
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+        raise
+    info["bytes"] = os.path.getsize(dst)
+    return info
+
+
+def pack_audio_ext(pack_dir: str, pack_report: dict | None = None) -> str:
+    """Extension of a delivered pack: pack.json format first, then the files.
+
+    ``pack_report.format.container`` wins; without it the directory is scanned
+    for ``*.wav`` / ``*.mp3``.  A mixed or empty pack defaults to ``.mp3``.
+    """
+    if isinstance(pack_report, dict):
+        fmt = pack_report.get("format")
+        if isinstance(fmt, dict):
+            container = str(fmt.get("container") or "").strip().lower().lstrip(".")
+            if container in ("mp3", "wav"):
+                return "." + container
+    extensions = set()
+    try:
+        names = os.listdir(pack_dir)
+    except OSError:
+        names = []
+    for name in names:
+        extension = os.path.splitext(name)[1].lower()
+        if extension in (".mp3", ".wav"):
+            extensions.add(extension)
+    if len(extensions) == 1:
+        return extensions.pop()
+    return SEGMENT_EXT
+
+
+def cards_audio_ext(work: str, doc: dict) -> str:
+    """Segment extension card names use: follow ``doc.pack_dir``, default mp3.
+
+    Single source for E9 ``cards_build`` and the E12 local rebuild in
+    ``markji_sync`` so an old wav pack keeps producing ``<NNN>.wav`` cards.
+    """
+    pack_dir_value = str((doc or {}).get("pack_dir") or "").strip()
+    if not pack_dir_value:
+        return SEGMENT_EXT
+    return pack_audio_ext(resolve_work_path(work or "", pack_dir_value))

@@ -98,6 +98,17 @@ def _other_runs(run_dir: str, work: str) -> int:
     return count
 
 
+def _pack_container(pack: dict) -> str:
+    """Report label for a delivered pack: format first, else infer like gate e7."""
+    fmt = pack.get("format") if isinstance(pack, dict) else None
+    if isinstance(fmt, dict):
+        container = str(fmt.get("container") or "").strip().lower()
+        if container in ("mp3", "wav"):
+            return container
+    pack_dir = str(pack.get("pack_dir") or "") if isinstance(pack, dict) else ""
+    return common.pack_audio_ext(pack_dir).lstrip(".")
+
+
 def _pack_manifest_extension(doc, pack: dict) -> bool:
     """A11: was the delivered pack manifest extended over the E5 6 columns?
 
@@ -291,7 +302,8 @@ def main(argv=None) -> int:
             lines.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 item["id"], item["stem"], stats.get("total", "—"),
                 stats.get("keep", "—"), cut.get("status", "—"),
-                "%s wav" % pack.get("count") if pack.get("count") is not None else "—",
+                "%s %s" % (pack.get("count"), _pack_container(pack))
+                if pack.get("count") is not None else "—",
                 gate_label,
                 "yes" if item["extended"] else "no",
             ))
@@ -332,8 +344,9 @@ def main(argv=None) -> int:
                 risks.append("%s 切分 ZIP 已被 cleanup 清理（A8）" % item["id"])
             if cut.get("status") == "needs_review":
                 lines.append("- 需要复核：见 `$RUN/docs/%s/issues.md`" % item["id"])
-            lines.append("- 包：`%s`（%s wav）"
-                         % (item["pack_dir"], pack.get("count", "—")))
+            lines.append("- 包：`%s`（%s %s）"
+                         % (item["pack_dir"], pack.get("count", "—"),
+                            _pack_container(pack)))
             if item["flags"]:
                 lines.append("- 长原子：%s"
                              % "、".join("%03d（%s 词）" % (flag.get("n"), flag.get("words"))

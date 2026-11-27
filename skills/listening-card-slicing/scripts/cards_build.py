@@ -174,7 +174,8 @@ def derive_family(row: dict, family_counts: dict) -> tuple:
     return "%s-%d" % (base, family_counts[base]), None
 
 
-def build_cards(parsed: dict, translations: dict, scheme: dict) -> list:
+def build_cards(parsed: dict, translations: dict, scheme: dict,
+                audio_ext: str = common.SEGMENT_EXT) -> list:
     """One card per keep row, in manifest order, with IDs and sentences."""
     family_counts = {}
     cards = []
@@ -201,7 +202,7 @@ def build_cards(parsed: dict, translations: dict, scheme: dict) -> list:
             "zh": zh,
             "en": sentences,
             "speakers": speakers,
-            "audio": "%s.wav" % number,
+            "audio": "%s%s" % (number, audio_ext),
             "position": row["position"],
         })
     return cards
@@ -381,7 +382,10 @@ def main(argv=None) -> int:
 
         scheme = load_scheme(args.id_scheme, doc["stem"]) if args.id_scheme \
             else derive_scheme(doc["stem"])
-        cards = build_cards(parsed, translations, scheme)
+        # E9 audio names follow the delivered pack (mp3 for new packs, wav for
+        # old ones); an absent pack falls back to the new default.
+        audio_ext = common.cards_audio_ext(work, doc)
+        cards = build_cards(parsed, translations, scheme, audio_ext)
         stats = check_cards(cards, parsed)
         tasks = task_payload(args.doc, cards, args.chunk)
 

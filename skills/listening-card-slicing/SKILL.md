@@ -7,18 +7,19 @@ description: 把「一段听力音频 + 已分段、无时间戳的原文」做�
 
 > 版本：0.1.0（GitHub 发行包）。产物契约以 `scripts/` 为准；开发测试与含真实转写文本的夹具未随发行包，本文随 0.1.0 同步。
 
-**0.1.0 变化（三项流程改进；E1–E12 编号 / 产物契约 / 脚本接口不变）**
+**0.1.0 变化（三项流程改进 + 片段容器 mp3；E1–E12 编号 / 脚本接口不变）**
 
 1. **E1 选择门（D3）**：正式开工前先跑 `preflight_choices.py --work "$W" --json`，只读列出材料（`docs` / `needs_user`）与云端牌组候选（`decks` / `deck_error`）；再用 `ask_user_question` 问两件事：**多选处理对象**（末项「全部处理」）+ **单选牌组**（3–5 个 `名称（已有 N 张卡）` + 「自己填」；`decks=[]` / `deck_error` 时只给自填或沿用）。`bootstrap.py --select <ids> --deck-name "<精确名>"` 把选择存进 `run.json`；E10 默认使用，不再重复问。云端不可用**不阻塞**材料选择与阶段一。
 2. **E9 中文校对「表格 + 直改」（D1）**：校对员回执可含 `zh_fixes`（整张卡中文行数组，`len(zh) == 英文句数`）；`cards_apply.py --review` 校验并渲染 `$RUN/docs/<doc>/zh-fixes.md`（卡片 / 当前 / 建议 / 理由），`cards.json` **原样不动**。用户敲定后 `zh_fix.py apply` **直接改** `translations.json`、`$RUN` + 包内 + 产出区 6 列清单；再 `approve.py` 重新定稿 → `cards_apply.py --refresh-zh` 更新 `cards-base.json` / `cards.json` → `gate e9` → E10 plan。**不重跑 E3/E5/E6/E7/E8**；用户可全部接受 / 只接受某几张 / 自己改措辞。
 3. **E10 样卡闸门分 first / veteran（D2）**：`plan` 记录目标牌组 `card_count` 与 `gate.mode`。**first**（空/新牌组）直接写 1 张样卡（不再先要 `approve2`，会话框**不展示卡片正文**）→ 请用户去 App 看 → `approve2.py --sample-no <NNN> --chapter-ok` → `gate e10` → `push`。**veteran**（牌组已有卡）自动跳过样卡与 `approve2`，直接 push；`diff_pending` 仍默认跳过，覆盖需用户明确 `approve2.py --veteran --updates-ok` + `push --allow-update`。`first_sample_pending` 时重跑 `plan` 仍按 first：只补 `approve2`，**不重写样卡**，成功 push 后才回 veteran。
+4. **片段容器改为 mp3（交付包）**：E7 交付包内片段由 `<NNN>.wav` 改为 `<NNN>.mp3`（44.1 kHz / 单声道 / 64 kbps CBR）；E6 的切分结果 ZIP 仍是 wav（中间物）。旧 wav 包仍可按阶段二继续跑；E1–E12 编号与脚本接口不变。
 
 **0.0.10 历史**：分组先分对话/独白（五类 merge + `merge_review` 复核）；重编分组保留译文记忆（整行 + 句级）；E6 串行锁 / `--timeout 3600` / 实时 `cut-cutter.log` / 混排与低覆盖护栏；cutaudio 1.1.1；扇出默认 `workflow` 每波 ≤8。细节见各角色卡与 `references/runtime/pipeline.md`。
 **0.0.9 历史**：分组从「宁并勿拆」改为「能独立听懂就拆」；`材料区/` 支持子目录与软链接/同内容去重。
 
 把一段听力音频和它**已分段、无时间戳**的原文，做成**本地一包片段 + 云端一套卡**。
 
-- **本地包**：`产出区/<stem>_音频切分（进牌组）/` —— 只含「进卡组＝是」的 `<NNN>.wav` 与一份 6 列清单（末列是译文）。
+- **本地包**：`产出区/<stem>_音频切分（进牌组）/` —— 只含「进卡组＝是」的 `<NNN>.mp3` 与一份 6 列清单（末列是译文）。
 - **云端**：墨墨某个牌组下一个章节里的 K 张卡，每张挂自己那段音频。
 - **一句话**：确定性活走 `scripts/`，语义判断派 6 种短任务；E1 选择门、2 道人工闸门（E5 / E10 first）必须停。
 
@@ -63,7 +64,7 @@ ls -d 产出区/*_音频切分（进牌组）/ 2>/dev/null        # 有没有已
 2. **原文是唯一文本真源**：不纠错、不改写、不润色；只允许删不发音的排版标记、按规则分组、补句末句号。清单是它的唯一投影；E5 只往后加「译文」列。
 3. **用户决定不代答**：E1 选择材料/牌组、E5 清单定稿、E10 首个新牌组样卡确认；`approve.json` / `approve2.json` 只由脚本写，批准绑内容 sha。老牌组 E10 自动放行，不算回话。3 次固定回话见下表。
 4. **判断给短任务，确定性给脚本**：回执文件是唯一事实；不手改产物、不手敲云端写入。改译文派译文复核员，改分组回 E4（E6 才切音频）；E9 中文问题写 `zh_fixes`，用 `zh_fix.py` 直改（不重跑上游）。
-5. **材料只读、系统不动、包干净**：`材料区/` 不删不改；`系统/` 只调用；包里只有清单 + `<NNN>.wav`，没有索引、子目录、ZIP 副本；不手删包。
+5. **材料只读、系统不动、包干净**：`材料区/` 不删不改；`系统/` 只调用；包里只有清单 + `<NNN>.mp3`，没有索引、子目录、ZIP 副本；不手删包。
 6. **证据落盘、汇报只报事实**：回执/清单/报告都在 `$RUN`；回复只报路径、行数、关卡结果；不打印 Key / token / 带签名 URL。
 
 ## 2 道人工闸门 · 3 次固定回话（0.1.0）
@@ -229,7 +230,7 @@ python3 "${S}/gate.py" e6 --run "${RUN}" --doc <doc>
 - **切后覆盖护栏**：`alignment.cut_mode == "edge"` 且 `alignment.coverage < 0.95` → exit 3（`对齐只覆盖 X% 音频…不要用这份切分`），保留 `cut-report.json` 排查；`wave` 模式 `matched < 0.9` 只 WARN。
 - **收口只认 `cut-report.json`**：`status` / `zip.path` / `zip.verified` / `segments` / `issues` / `review_ignore` / `ignored_issues`；不从日志找「完成」。切前把 `keep=false` 的行号写进 `docs/<doc>/review-ignore.json` 交给 cutaudio（需 **≥ 1.1.0** 的 `--review-ignore`）：**只有触及 `keep=true` 行的 issue 才拦 `gate e6`**，开场/报幕/指令/结尾的静音只记 `ignored`，仍写全量结果；旧 cutaudio 没有该 flag 时回退旧行为并 warning，`gate e6` 审计 `review_ignore` 与 `ignored_issues`。`cut_stage` exit 3 / `needs_review`（进卡组行仍有 issue）→ 停下问用户，贴 `issues.md` 段号 + 原因。`gate e6` PASS 后**禁止**再 cleanup（会删 E7 要用的 ZIP），直接 E7。
 - `cut-report.manifest_sha256` 绑 **`manifest-5col.md`**（E4 冻结基线），不绑 6 列；包已交付后 `gate e6` 的 `manifest_sha` 不一致**只 WARN**。
-- 开头未覆盖语音：首行是「否」→ 记录继续；首行是「是」→ 请用户试听 `001.wav`，只有「接受」或「停下汇报」两种处置，不自行造文本。
+- 开头未覆盖语音：首行是「否」→ 记录继续；首行是「是」→ 请用户试听 `001.mp3`，只有「接受」或「停下汇报」两种处置，不自行造文本。
 
 ## E7 · 分卡 + 成包 → 交付包
 
@@ -239,7 +240,7 @@ python3 "${S}/gate.py" e7 --run "${RUN}" --doc <doc>
 ```
 
 - 还没切过可用 `--stage all` 一条命令跑切分 + 分卡（同样放后台、同样抢 E6/E7 串行锁；**先过 E5 定稿**）；**同一切分文本会 resume**（`cut-report.text_sha256` == 当前文本 sha 就跳过 cut 直接 pack）；文本变了 / 缺绑定才 exit 2 并提示 `--reset`。**只改 `keep` 而切分文本没变**时同样会 resume，旧 `review_ignore` 与当前 `segments.json` 不一致 → `gate e6` 要求 `--reset` 重切（审计，不是 bug）。`gate e6` PASS 后只跑 `--stage pack`。
-- 包名/清单名由 `doc.json` 决定；ZIP 只从 `cut-report.json.zip.path` 取。**关卡**：目录名逐字、只有清单 + wav、wav 数 = 进卡组行数、文件名 = 行号、每个 wav > 0.2 s、清单 sha 三处绑定一致；包内 6 列清单的前 5 列 == `manifest-5col.md`，第 6 列扩展只 WARN。
+- 包名/清单名由 `doc.json` 决定；ZIP 只从 `cut-report.json.zip.path` 取。**关卡**：目录名逐字、只有清单 + mp3、mp3 数 = 进卡组行数、文件名 = 行号、每个 mp3 > 0.2 s、每个 mp3 还必须满足 44.1 kHz / 单声道 / 64 kbps 规格（不符 FAIL，label `segment_format:<file>`）、清单 sha 三处绑定一致；包内 6 列清单的前 5 列 == `manifest-5col.md`，第 6 列扩展只 WARN。
 
 ## E8 · 汇报 + 清理（阶段一收尾）
 
@@ -255,7 +256,7 @@ python3 "${S}/gate.py" e8 --run "${RUN}"           # ④ 全局关卡，不带 -
 
 **阶段二 · 卡片（E9）**
 - **做**：派生卡片 ID/顺序/断行任务 → 派排版员 → 合入渲染 → 派校对员（英文断行 `fixes` / 中文 `zh_fixes` 表格）→ 用户敲定中文后用 `zh_fix.py` 直改。 ｜ **产出**：`cards-base.json`、`card-tasks.json`、`cards/<task>.json`、`cards.json`、`cards-preview.md`（默认前 1–3 张样卡）、`cards-review-<n>.json`、`zh-fixes.md`。
-- **关卡**：`gate.py e9`（`manifest_finalized` 重算 `rows` + `cards_aggregate_sha` + 逐卡校验）。 ｜ **失败**：断行改字 → 只重派那张卡的任务；ID/顺序不对 → 看 `stem`，必要时 `--id-scheme`；中文问题 → `zh_fixes` → `zh_fix.py apply`（不重跑 E3/E5/E6/E7/E8）。 ｜ **谁做**：排版员 / 校对员（短任务）+ 总调度 + 用户（敲定中文建议）。
+- **关卡**：`gate.py e9`（`manifest_finalized` 重算 `rows` + `cards_aggregate_sha` + 逐卡校验；`cards.json` 每张卡的 `audio` 文件必须真实存在于交付包，缺 → FAIL，label `card_audio:<no>`）。 ｜ **失败**：断行改字 → 只重派那张卡的任务；ID/顺序不对 → 看 `stem`，必要时 `--id-scheme`；中文问题 → `zh_fixes` → `zh_fix.py apply`（不重跑 E3/E5/E6/E7/E8）。 ｜ **谁做**：排版员 / 校对员（短任务）+ 总调度 + 用户（敲定中文建议）。
 
 ## 阶段二 · E9 卡片（ID、断行、渲染、中文校对）
 
@@ -439,7 +440,7 @@ awk '/^\|---/{f=1;next} f&&/^\|/{print}' "$M" | head -15
 ```text
 样卡已写入，请你在 App 里看一眼（这里不贴卡片正文）：
 【牌组】<牌组名> → 【章节】<章节名>（<存在 / 将新建>）
-【样卡】<标题>（音频 <NNN>.wav）；【不一致的卡】<Z> 张（默认不动，保持你手改的版本；要覆盖得你点头）
+【样卡】<标题>（音频 <NNN>.mp3）；【不一致的卡】<Z> 张（默认不动，保持你手改的版本；要覆盖得你点头）
 请确认三件事：1) 正反面音频能播放、是 <NNN> 那段；2) 中英文一句一行、语气自然；3) 英文断行顺眼。
 回「可以」我就写确认令牌，按顺序写剩下 <K-1> 张（约 3–6 分钟），写完读回整章核对。要改现在说：墨墨没有删除接口，写进去的卡删不掉，改只能整张 update。
 ```

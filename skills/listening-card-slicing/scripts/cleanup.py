@@ -17,7 +17,7 @@ Rules (接口约定 §3.6 + 接口修订 A8 + 0.0.4 文档作用域):
 * delete the review-period ``<stem>_切分清单.md`` **only** when a delivered
   pack already contains a manifest with the same file name;
 * never delete ``*_音频切分（进牌组）/`` (current or ``.prev-`` archived), any
-  ``*.wav`` outside a pack, ``材料区/`` or ``系统/``;
+  ``*.mp3`` outside a pack, ``材料区/`` or ``系统/``;
 * every candidate is resolved and must sit directly inside the output area —
   anything else is refused and reported;
 * never deletes ``approve.json``, ``pack.json`` / ``receipts/pack.json`` or an

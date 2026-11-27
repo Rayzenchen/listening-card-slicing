@@ -787,7 +787,68 @@ def _print_cut_summary(doc, report, paths, issues_path, quiet: bool,
 # --- E7 ---------------------------------------------------------------------
 
 
-def _read_pack_files(paths: dict) -> list:
+#: ``split_cards.py`` emits wav; ``_transcode_pack_audio`` rewrites them to mp3.
+_WAV_SEGMENT_RE = re.compile(r"^(\d{3,})\.wav$")
+#: A delivered segment, either container (old wav packs must stay readable).
+_SEGMENT_RE = re.compile(r"^(\d{3,})\.(mp3|wav)$")
+
+
+def _discard_pack_dir(pack_dir: str, existed_before: bool) -> None:
+    """Roll back a failed E7: the pack directory was empty or absent before."""
+    if not os.path.isdir(pack_dir):
+        return
+    if not existed_before:
+        shutil.rmtree(pack_dir, ignore_errors=True)
+        return
+    for name in os.listdir(pack_dir):
+        path = os.path.join(pack_dir, name)
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def _transcode_pack_audio(paths: dict, log=None) -> dict:
+    """Turn every ``<NNN>.wav`` of a fresh pack into ``<NNN>.mp3`` (64k mono).
+
+    Runs after ``split_cards`` succeeded and before ``_read_pack_files``.  A
+    failure raises ``Failure(EXIT_FAIL)`` (the caller removes the pack dir), so
+    a half-transcoded pack is never delivered.  Returns
+    ``{"count", "wav_bytes", "mp3_bytes"}``.
+    """
+    pack_dir = paths["pack_dir"]
+    wav_names = sorted(name for name in os.listdir(pack_dir)
+                       if _WAV_SEGMENT_RE.match(name)
+                       and os.path.isfile(os.path.join(pack_dir, name)))
+    if not wav_names:
+        return {"count": 0, "wav_bytes": 0, "mp3_bytes": 0}
+    ffmpeg = common.find_ffmpeg(paths.get("work") or "")
+    wav_bytes = 0
+    mp3_bytes = 0
+    for name in wav_names:
+        src = os.path.join(pack_dir, name)
+        dst = os.path.join(pack_dir, name[:-len(".wav")] + common.SEGMENT_EXT)
+        try:
+            before = os.path.getsize(src)
+            info = common.transcode_segment(src, dst, ffmpeg)
+            os.remove(src)
+        except (OSError, ValueError) as exc:
+            raise common.Failure(common.EXIT_FAIL,
+                                 "片段 %s 转 mp3 失败：%s" % (name, exc))
+        wav_bytes += before
+        mp3_bytes += int(info.get("bytes") or os.path.getsize(dst))
+    if log is not None:
+        log("transcode wav->mp3: %d 个（%s -> %s，%s）"
+            % (len(wav_names), common.format_size(wav_bytes),
+               common.format_size(mp3_bytes), ffmpeg))
+    return {"count": len(wav_names), "wav_bytes": wav_bytes,
+            "mp3_bytes": mp3_bytes}
+
+
+def _read_pack_files(paths: dict, ffmpeg: str | None = None) -> list:
     files = []
     manifest_name = os.path.basename(paths["manifest"])
     for name in sorted(os.listdir(paths["pack_dir"])):
@@ -796,12 +857,18 @@ def _read_pack_files(paths: dict) -> list:
             continue
         if name == manifest_name:
             continue
-        match = re.match(r"^(\d{3,})\.wav$", name)
+        match = _SEGMENT_RE.match(name)
         if not match:
             raise common.Failure(common.EXIT_FAIL,
-                                 "包内出现非 wav/清单文件：%s" % name)
+                                 "包内出现非片段/清单文件：%s" % name)
+        extension = "." + match.group(2).lower()
         try:
-            duration = gates.wav_duration_sec(path)
+            if extension == ".mp3":
+                if not ffmpeg:
+                    ffmpeg = common.find_ffmpeg(paths.get("work") or "")
+                duration = common.probe_audio(path, ffmpeg)["duration_sec"]
+            else:
+                duration = gates.wav_duration_sec(path)
         except (OSError, ValueError) as exc:
             raise common.Failure(common.EXIT_FAIL, "读不了 %s：%s" % (name, exc))
         files.append({
@@ -816,7 +883,7 @@ def _read_pack_files(paths: dict) -> list:
 
 
 def run_pack(run: dict, doc: dict, args, log, lock=None) -> int:
-    """E7: pack the cards-only wavs + the 6-column manifest into 产出区."""
+    """E7: pack the cards-only segments (mp3 44.1k/mono/64k) + 6-column manifest."""
     if lock is None:
         owned = E6E7Lock(run["run"], doc["id"], "pack").acquire()
         try:
@@ -893,15 +960,30 @@ def run_pack(run: dict, doc: dict, args, log, lock=None) -> int:
     if not os.path.isdir(paths["pack_dir"]):
         raise common.Failure(common.EXIT_FAIL,
                              "split_cards 返回 0 但没有包目录：%s" % paths["pack_dir"])
+    try:
+        _transcode_pack_audio(paths, log)
+    except common.Failure:
+        _discard_pack_dir(paths["pack_dir"], existed_before)
+        raise
+    except Exception as exc:  # noqa: BLE001 - any transcode crash rolls the pack back
+        _discard_pack_dir(paths["pack_dir"], existed_before)
+        raise common.Failure(common.EXIT_FAIL, "片段转 mp3 失败：%s" % exc)
     files = _read_pack_files(paths)
     keep_rows = [row for row in common.parse_manifest_6col(paths["manifest"])["rows"]
                  if row["keep"]]
     if [item["n"] for item in files] != [row["n"] for row in keep_rows]:
         raise common.Failure(
             common.EXIT_FAIL,
-            "包内 wav 编号与清单进卡组行号不一致（%d 个文件 vs %d 行）"
+            "包内片段编号与清单进卡组行号不一致（%d 个文件 vs %d 行）"
             % (len(files), len(keep_rows)),
         )
+    extensions = {os.path.splitext(item["file"])[1].lower() for item in files}
+    if len(extensions) > 1:
+        raise common.Failure(common.EXIT_FAIL,
+                             "包内片段扩展名混排：%r" % sorted(extensions))
+    container = extensions.pop().lstrip(".") if extensions else "mp3"
+    pack_format = dict(common.SEGMENT_FORMAT) if container == "mp3" \
+        else {"container": container}
     manifest_sha = common.sha256_file(paths["manifest"])
     pack_report = {
         "version": 1,
@@ -910,6 +992,7 @@ def run_pack(run: dict, doc: dict, args, log, lock=None) -> int:
         "manifest": os.path.join(paths["pack_dir"], os.path.basename(paths["manifest"])),
         "manifest_sha256": manifest_sha,
         "manifest_columns": 6,
+        "format": pack_format,
         "zip_path": zip_path,
         "zip_verified": True,
         "count": len(files),
@@ -938,18 +1021,32 @@ def run_pack(run: dict, doc: dict, args, log, lock=None) -> int:
     doc["pack_manifest"] = pack_report["manifest"]
     doc["manifest_sha256_v2"] = manifest_sha
     common.atomic_write_json(os.path.join(doc_dir, "doc.json"), doc)
-    log("pack.json written (%d wav)" % len(files))
+    log("pack.json written (%d %s)" % (len(files), _pack_container(pack_report)))
     _print_pack_summary(doc, pack_report, args.json)
     return common.EXIT_OK
+
+
+def _pack_container(pack_report: dict) -> str:
+    """Container label of a pack report: format first, old reports scan the dir."""
+    fmt = pack_report.get("format") or {}
+    container = str(fmt.get("container") or "").strip().lower()
+    if container in ("mp3", "wav"):
+        return container
+    pack_dir = pack_report.get("pack_dir") or ""
+    return common.pack_audio_ext(pack_dir, pack_report).lstrip(".")
 
 
 def _print_pack_summary(doc, pack_report, quiet: bool) -> None:
     if quiet:
         return
+    container = _pack_container(pack_report)
     print("DOC=%s  E7 pack" % doc["id"])
     print("包：%s" % pack_report["pack_dir"])
-    print("wav：%d 个（清单 %d 行）" % (pack_report["count"],
-                                    len(pack_report["keep_rows"])))
+    if container == "mp3":
+        print("mp3：%d 个（44.1k/mono/64k）" % pack_report["count"])
+    else:
+        print("%s：%d 个（旧 wav 包兼容）" % (container, pack_report["count"]))
+    print("清单：%d 行" % len(pack_report["keep_rows"]))
     print("清单 sha256：%s" % pack_report["manifest_sha256"])
 
 

@@ -53,7 +53,8 @@ FAIL = "FAIL"
 MANIFEST_KEEP_HEAD = "## 进卡组清单"
 PACK_SUFFIX = "_音频切分（进牌组）"
 ROW_NUMBER_RE = re.compile(r"^\d{3,}$")
-WAV_NAME_RE = re.compile(r"^(\d{3,})\.wav$")
+#: A delivered segment: old packs are ``<NNN>.wav``, new packs ``<NNN>.mp3``.
+AUDIO_SEGMENT_RE = re.compile(r"^(\d{3,})\.(wav|mp3)$")
 
 
 # --- checker ----------------------------------------------------------------
@@ -1671,8 +1672,122 @@ def check_e6(gate: GateRun, doc: DocContext, checker: Checker,
 # --- E7（分包） --------------------------------------------------------------
 
 
+def _inspect_pack_audio(checker: Checker, pack_dir: str, manifest_name: str,
+                        keep_numbers, pack_report: dict | None,
+                        work: str = "", ffmpeg: str | None = None) -> dict:
+    """Inspect the audio segments of one delivered pack (pure, unit-testable).
+
+    The expected extension comes from :func:`common.pack_audio_ext`: a new
+    ``pack.json.format`` wins, an old pack (no format) is inferred from the
+    files.  Old wav packs and new mp3 packs both pass; a pack that mixes wav
+    and mp3 FAILs.  Durations: mp3 through ``common.probe_audio`` (ffmpeg
+    stderr, no ffprobe), wav through :func:`wav_duration_sec`.
+
+    Returns ``{"ext", "audio", "durations", "mixed"}`` for the caller.
+    """
+    names = sorted(os.listdir(pack_dir))
+    audio = []
+    unexpected = []
+    for name in names:
+        path = os.path.join(pack_dir, name)
+        if not os.path.isfile(path) or name == manifest_name:
+            continue
+        if AUDIO_SEGMENT_RE.match(name):
+            audio.append(name)
+        else:
+            unexpected.append(name)
+    checker.expect("pack_clean", not unexpected,
+                   "包内有多余文件（非片段/清单）：%r" % unexpected)
+    extensions = sorted({AUDIO_SEGMENT_RE.match(name).group(2).lower()
+                         for name in audio})
+    expected_ext = common.pack_audio_ext(pack_dir, pack_report).lower()
+    mixed = len(extensions) > 1
+    checker.expect("pack_format", not mixed,
+                   "包内片段扩展名混排：%r（同一包必须统一为一种）" % extensions)
+    expected_names = ["%03d%s" % (int(number), expected_ext)
+                      for number in keep_numbers]
+    checker.expect("segment_count", len(audio) == len(keep_numbers),
+                   "片段数 %d != 进卡组行数 %d"
+                   % (len(audio), len(keep_numbers)))
+    checker.expect("segment_names", sorted(audio) == sorted(expected_names),
+                   "片段文件名与进卡组行号不是一一对应（期望 *%s）" % expected_ext)
+    durations = {}
+    probe_failed = False
+    for name in sorted(audio):
+        path = os.path.join(pack_dir, name)
+        extension = "." + AUDIO_SEGMENT_RE.match(name).group(2).lower()
+        try:
+            if extension == ".mp3":
+                if not ffmpeg:
+                    try:
+                        ffmpeg = common.find_ffmpeg(work)
+                    except common.Failure as exc:
+                        checker.fail("segment_probe",
+                                     "mp3 时长需要 ffmpeg：%s" % exc.message)
+                        probe_failed = True
+                        break
+                probed = common.probe_audio(path, ffmpeg)
+                seconds = probed["duration_sec"]
+                expected = common.SEGMENT_FORMAT
+                if (probed.get("sample_rate") != expected["sample_rate"]
+                        or probed.get("channels") != expected["channels"]
+                        or probed.get("kbps") != expected["bitrate_kbps"]):
+                    checker.fail(
+                        "segment_format:%s" % name,
+                        "mp3 规格 %s Hz / %s 声道 / %s kbps"
+                        "（要 44100 Hz / 单声道 / 64 kbps）"
+                        % (probed.get("sample_rate"), probed.get("channels"),
+                           probed.get("kbps")))
+            else:
+                seconds = wav_duration_sec(path)
+        except (OSError, ValueError) as exc:
+            checker.fail("segment:%s" % name,
+                         "读不了 %s 时长：%s" % (extension.lstrip("."), exc))
+            continue
+        durations[name] = seconds
+        if seconds <= 0.2:
+            checker.fail("segment_duration:%s" % name,
+                         "时长 %.3fs 不大于 0.2s" % seconds)
+    if not probe_failed and audio and len(durations) == len(audio):
+        checker.ok("segment_duration", "全部 > 0.2s")
+    return {"ext": expected_ext, "audio": audio, "durations": durations,
+            "mixed": mixed}
+
+
+def _check_pack_format_meta(checker: Checker, pack_dir: str,
+                            pack_report) -> None:
+    """An mp3 pack that declares ``pack.json.format`` must declare the spec.
+
+    Old wav packs (format absent, or actual files wav) are out of scope.
+    """
+    if not isinstance(pack_report, dict):
+        return
+    fmt = pack_report.get("format")
+    if not isinstance(fmt, dict):
+        return
+    try:
+        names = os.listdir(pack_dir)
+    except OSError:
+        return
+    audio = [name for name in names
+             if AUDIO_SEGMENT_RE.match(name)
+             and os.path.isfile(os.path.join(pack_dir, name))]
+    if not audio or not all(name.lower().endswith(".mp3") for name in audio):
+        return
+    expected = common.SEGMENT_FORMAT
+    mismatches = []
+    for key in ("container", "sample_rate", "channels", "bitrate_kbps"):
+        if fmt.get(key) != expected[key]:
+            mismatches.append("%s=%r（要 %r）" % (key, fmt.get(key), expected[key]))
+    checker.expect("pack_format_meta", not mismatches,
+                   "pack.json.format 与 mp3 规格不符：%s" % "、".join(mismatches))
+
+
 def check_e7(gate: GateRun, doc: DocContext, checker: Checker) -> None:
-    """E7：交付包 = wav + 6 列清单（前 5 列 = E4 冻结基线，第 6 列只 WARN）。"""
+    """E7：交付包 = 片段（mp3，44.1k/mono/64k；旧包 wav 兼容）+ 6 列清单。
+
+    清单前 5 列仍是 E4 冻结基线，第 6 列只 WARN（A11）。
+    """
     pack_dir = os.path.abspath(doc.pack_dir)
     checker.expect("pack_dir", os.path.isdir(pack_dir), "包目录不存在：%s" % pack_dir)
     if not os.path.isdir(pack_dir):
@@ -1685,9 +1800,6 @@ def check_e7(gate: GateRun, doc: DocContext, checker: Checker) -> None:
     entry_names = sorted(os.listdir(pack_dir))
     manifest_name = os.path.basename(doc.manifest)
     checker.expect("pack_manifest", manifest_name in entry_names, "包内缺清单 %s" % manifest_name)
-    unexpected = [name for name in entry_names
-                  if name != manifest_name and not name.endswith(".wav")]
-    checker.expect("pack_clean", not unexpected, "包内有多余文件：%r" % unexpected)
     subdirs = [name for name in entry_names
                if os.path.isdir(os.path.join(pack_dir, name))]
     checker.expect("pack_nodirs", not subdirs, "包内有子目录：%r" % subdirs)
@@ -1703,25 +1815,26 @@ def check_e7(gate: GateRun, doc: DocContext, checker: Checker) -> None:
           "position": row["position"], "display": row["text_display"]}
          for row in doc.segments()["rows"]]
     keep_numbers = [row["n"] for row in reference_rows if row["keep"]]
-    wav_names = [name for name in entry_names if name.endswith(".wav")]
-    expected_wavs = ["%03d.wav" % number for number in keep_numbers]
-    checker.expect("wav_count", len(wav_names) == len(keep_numbers),
-                   "wav 数 %d != 进卡组行数 %d" % (len(wav_names), len(keep_numbers)))
-    checker.expect("wav_names", sorted(wav_names) == sorted(expected_wavs),
-                   "wav 文件名与进卡组行号不是一一对应")
-    durations = {}
-    for name in sorted(wav_names):
-        path = os.path.join(pack_dir, name)
+
+    # pack.json first: its format tells _inspect_pack_audio which extension to
+    # expect (old packs have no format and are inferred from the files).
+    pack_report_path = doc.path("pack.json")
+    pack_report = None
+    checker.expect("pack_json", os.path.isfile(pack_report_path), "缺 pack.json")
+    if os.path.isfile(pack_report_path):
         try:
-            seconds = wav_duration_sec(path)
-        except (OSError, ValueError) as exc:
-            checker.fail("wav:%s" % name, "读不了 WAV：%s" % exc)
-            continue
-        durations[name] = seconds
-        if seconds <= 0.2:
-            checker.fail("wav_duration:%s" % name, "时长 %.3fs 不大于 0.2s" % seconds)
-    if len(durations) == len(wav_names):
-        checker.ok("wav_duration", "全部 > 0.2s")
+            loaded = common.read_json(pack_report_path)
+        except common.Failure as exc:
+            checker.fail("pack_json", exc.message)
+        else:
+            if isinstance(loaded, dict):
+                pack_report = loaded
+            else:
+                checker.fail("pack_json", "pack.json 不是 JSON 对象")
+    audio_info = _inspect_pack_audio(checker, pack_dir, manifest_name,
+                                     keep_numbers, pack_report, work=gate.work)
+    audio_names = audio_info["audio"]
+    _check_pack_format_meta(checker, pack_dir, pack_report)
 
     # manifest: package copy vs frozen reference, with A11 extension tolerance
     if manifest_name in entry_names:
@@ -1764,30 +1877,23 @@ def check_e7(gate: GateRun, doc: DocContext, checker: Checker) -> None:
                                "产出区清单与 5 列基线不兼容：%s" % out_reason)
 
     # pack.json / receipt
-    pack_report_path = doc.path("pack.json")
-    checker.expect("pack_json", os.path.isfile(pack_report_path), "缺 pack.json")
-    if os.path.isfile(pack_report_path):
-        try:
-            pack_report = common.read_json(pack_report_path)
-        except common.Failure as exc:
-            checker.fail("pack_json", exc.message)
-        else:
-            listed = pack_report.get("files") or []
-            listed_names = [item.get("file") for item in listed if isinstance(item, dict)]
-            checker.expect("pack_json_files", sorted(listed_names) == sorted(wav_names),
-                           "pack.json 的文件清单与包内 wav 不一致")
-            checker.expect("pack_json_count", pack_report.get("count") == len(wav_names),
-                           "pack.json 的 count 与 wav 数不符")
-            for item in listed:
-                if not isinstance(item, dict) or not item.get("file"):
-                    continue
-                path = os.path.join(pack_dir, item["file"])
-                if not os.path.isfile(path):
-                    checker.fail("pack_json_file", "pack.json 列了不存在的文件 %s" % item["file"])
-                    break
-                if item.get("sha256") and _sha(path) != item["sha256"]:
-                    checker.fail("pack_json_sha", "%s 的 sha 与 pack.json 不符" % item["file"])
-                    break
+    if pack_report is not None:
+        listed = pack_report.get("files") or []
+        listed_names = [item.get("file") for item in listed if isinstance(item, dict)]
+        checker.expect("pack_json_files", sorted(listed_names) == sorted(audio_names),
+                       "pack.json 的文件清单与包内片段不一致")
+        checker.expect("pack_json_count", pack_report.get("count") == len(audio_names),
+                       "pack.json 的 count 与片段数不符")
+        for item in listed:
+            if not isinstance(item, dict) or not item.get("file"):
+                continue
+            path = os.path.join(pack_dir, item["file"])
+            if not os.path.isfile(path):
+                checker.fail("pack_json_file", "pack.json 列了不存在的文件 %s" % item["file"])
+                break
+            if item.get("sha256") and _sha(path) != item["sha256"]:
+                checker.fail("pack_json_sha", "%s 的 sha 与 pack.json 不符" % item["file"])
+                break
     checker.expect("pack_receipt", os.path.isfile(os.path.join(doc.dir, "receipts", "pack.json")),
                    "缺 receipts/pack.json")
 
@@ -2143,6 +2249,43 @@ def check_e9(gate: GateRun, doc: DocContext, checker: Checker) -> None:
     bad_titles = [title for title in titles if not PHASE2_TITLE_RE.match(str(title))]
     checker.expect("cards_ids", not bad_titles,
                    "标题不符合 ID 方案：%s" % "、".join(map(str, bad_titles[:5])))
+    # D: every card's audio must be a real file in the delivered pack (mp3 or
+    # wav) and must be named after the card number + the pack's real extension.
+    # A bare existence check would accept another card's file or an outside path.
+    pack_dir = os.path.abspath(doc.pack_dir)
+    if not os.path.isdir(pack_dir):
+        checker.fail("card_audio_dir", "交付包不存在，无法核对卡片音频：%s" % pack_dir)
+    else:
+        try:
+            pack_report = doc.pack_report()
+        except common.Failure:
+            pack_report = None
+        extension = common.pack_audio_ext(pack_dir, pack_report).lower()
+        bad_audio = []
+        for card in cards:
+            number = str(card.get("no"))
+            name = str(card.get("audio") or "")
+            expected = None
+            try:
+                expected = "%03d%s" % (int(number), extension)
+            except (TypeError, ValueError):
+                expected = None
+            reason = None
+            if not name:
+                reason = "没有 audio 文件名"
+            elif "/" in name or "\\" in name or ".." in name:
+                reason = "audio 必须是包内文件名：%r" % name
+            elif expected is None:
+                reason = "卡号不是数字：%r" % number
+            elif name != expected:
+                reason = "audio=%r，期望包内文件 %r" % (name, expected)
+            elif not os.path.isfile(os.path.join(pack_dir, name)):
+                reason = "包内缺音频文件 %r" % name
+            if reason:
+                bad_audio.append(number)
+                checker.fail("card_audio:%s" % number, reason)
+        if not bad_audio:
+            checker.ok("card_audio", "全部符合包内文件名并存在")
     translations = _load_artifact(checker, doc.path("translations.json"), "translations")
     if translations is None:
         return

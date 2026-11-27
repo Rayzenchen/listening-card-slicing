@@ -103,12 +103,12 @@
 | 对象 | 规则 |
 |---|---|
 | 包目录 | `产出区/<stem>_音频切分（进牌组）/`（全角括号、下划线半角） |
-| 片段文件 | `<NNN>.wav`，NNN = 清单行号（3 位补零） |
+| 片段文件 | `<NNN>.mp3`，NNN = 清单行号（3 位补零）；mp3 / 44.1 kHz / 单声道 / 64 kbps CBR |
 | 包内清单 | `<stem>_切分清单.md`（与 `$RUN` 副本同 sha） |
 | 评审期清单 | `产出区/<stem>_切分清单.md`（E8 收尾由 cleanup 删） |
 
 - **编号不是 keep 行的连续序号**：否行留空号，包内文件名有断号是正常的；文件名集合 = keep 行列号集合。
-- **包内只有清单 + wav**：无 JSON/CSV/txt 索引、无子目录、无 ZIP 副本、无 `.DS_Store`；wav 数 = keep 行数、每个 wav > 0.2 s。
+- **包内只有清单 + mp3**：无 JSON/CSV/txt 索引、无子目录、无 ZIP 副本、无 `.DS_Store`；mp3 数 = keep 行数、每个 mp3 > 0.2 s（时长用 `ffmpeg -i <file> -f null -` 的 stderr 探测，不用 `ffprobe`），且 gate e7 逐段复核 44.1 kHz / 单声道 / 64 kbps 规格。旧 wav 包仍可跑：`pack.json.format` 缺省按包内实际扩展名推断（新包 mp3、旧包 wav），同一包内扩展名必须统一。
 - **sha 绑定**：`segments.manifest_sha256`、`doc.json.manifest_sha256`、包内清单前 5 列与 `manifest-5col.md` 一致；E5 的 6 列 sha 由 `approve.json` 绑定。
 - **扩展兼容**：包内清单在 `manifest-5col.md` 右侧多第 6 列/说明行、且前 5 列、表头前 5 格、区间行、固定句逐字不变 → `gate e7`/`e8` 记 `WARN pack_manifest_extended`，**不 FAIL**；其它任何差异 FAIL。
 - **卡住不要手改**：清单/切分文本是证据链，手改一处就对不上；回上游重跑（改译文走 `translate_apply.py --review`）。

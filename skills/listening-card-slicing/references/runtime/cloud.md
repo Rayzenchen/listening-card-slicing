@@ -55,7 +55,7 @@ plan 至少含：
   "gate": {"mode": "first|veteran", "sample_required": true,
            "marker": "empty_or_missing|deck_card_count>0|first_sample_pending"},
   "cards": [{"no": "<NNN>", "title": "…", "action": "create|skip_identical|diff_pending",
-             "card_id": "…", "audio": "<NNN>.wav", "file_id": "…", "diff_summary": "…",
+             "card_id": "…", "audio": "<NNN>.mp3", "file_id": "…", "diff_summary": "…",
              "byte_equal": false}],
   "counts": {"cards": 0, "create": 0, "skip_identical": 0, "diff_pending": 0},
   "cards_sha256": "<卡片集 sha>",
@@ -91,7 +91,7 @@ python3 "${S}/approve2.py" --run "${RUN}" --doc <doc> --veteran [--updates-ok] -
 
 ## 6. 样卡（E10 `--stage sample`）
 
-- **first**：**不要求** `approve2.json`（App 确认在样卡之后）。`sample` 选一张 `create` 卡（默认第一张；`--no <NNN>` 指定），`upload` wav（同文件幂等）→ `create` → 读回 `content` / `files[]` → 比对；输出只报卡号/标题/卡 ID，**不打印卡片正文**。读回不一致 → exit 1，**不要 push**。
+- **first**：**不要求** `approve2.json`（App 确认在样卡之后）。`sample` 选一张 `create` 卡（默认第一张；`--no <NNN>` 指定），`upload` mp3（同文件幂等）→ `create` → 读回 `content` / `files[]` → 比对；输出只报卡号/标题/卡 ID，**不打印卡片正文**。读回不一致 → exit 1，**不要 push**。
 - **veteran**：**不写云端**，只写 `receipts/markji-sample.json = {"mode":"veteran","skipped":true,"result":"ok",...}`；`--no` 被忽略。`gate e10` 不要求这份回执，跑不跑都行。
 - 回执 `receipts/markji-sample.json`（first）至少含：`mode=first` / `no` / `title` / `action` / `plan_sha256` / `decision_sha256` / `cards_sha256` / `content_sha256` / `readback_sha256` / `result` / `at`（另有 `card_id` / `file_id` / `chapter_id` / `chapter_created` / `byte_equal`）。
   - `content_sha256` = **cards.json 的期望内容** sha（不是云端读回）；`readback_sha256` = 云端读回正文的 sha；`cards_sha256` 必须等于当前卡片集，`result=ok` 才算样卡通过。
@@ -110,7 +110,7 @@ python3 "${S}/gate.py" e11 --run "${RUN}" --doc <doc>
 
 - 前置按 `plan.gate.mode`：**first** 必须有 `approve2.json` **且** first 样卡回执（缺 → exit 3）；**veteran** 两者都不需要（有 `approve2.json` 时只读 `updates_ok`）。
 - 开始前**重读云端**（防用户手改/手删）：计划里的 `create` 若现在已存在 → 降级为 `skip_identical` / `diff_pending`；计划变了 → 重新 plan + 重新批准。
-- 逐张：`upload` wav（幂等）→ 只做 `create` / `skip_identical`；`diff_pending` 跳过并记 `skipped[]`。
+- 逐张：`upload` mp3（幂等）→ 只做 `create` / `skip_identical`；`diff_pending` 跳过并记 `skipped[]`。
 - **只有** `--allow-update` **且** `approve2.updates_ok=true`，才对 plan 里 `action=diff_pending` 的卡整张 `update`（不新建、不删除）；veteran 的令牌用 `approve2.py --veteran --updates-ok`。运行中新出现的 diff 跳过并 WARN。
 - 写入后按 `order` 重排：`card_ids[i] != want[i]` 就对 `want[i]` 调 `move --order i`，最多两轮；仍不一致 → 停、记回执、问用户。
 - 回执 `receipts/markji-push.json` **成功或失败都写**；失败也保住已写 `card_id`，记 `result=fail` + 已完成 `cards[]`。`markji.json.sample` 对 veteran 记 `{"mode":"veteran","skipped":true}`，对 first 记样卡摘要。

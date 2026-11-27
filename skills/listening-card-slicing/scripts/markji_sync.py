@@ -89,7 +89,8 @@ def load_local(run: dict, doc: dict, doc_path: str) -> tuple:
     for key, value in (translations_doc.get("rows") or {}).items():
         translations[common.fmt_row(int(key))] = list(value)
     scheme = cards_build.derive_scheme(doc["stem"])
-    cards = cards_build.build_cards(parsed, translations, scheme)
+    cards = cards_build.build_cards(
+        parsed, translations, scheme, common.cards_audio_ext(work, doc))
     local = {
         "version": 1,
         "doc": doc["id"],
